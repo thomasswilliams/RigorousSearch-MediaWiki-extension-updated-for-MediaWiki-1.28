@@ -1,0 +1,10 @@
+{
+	"@metadata": {
+		"authors": [
+			"Johan the Ghost",
+      "Thomas Williams https://thomasswilliams.github.io/"
+		]
+	},
+  "rigoroussearch": "Rigorous Search",
+	"rigoroussearch-desc": "Performs a search on full page text (including links etc.)"
+}

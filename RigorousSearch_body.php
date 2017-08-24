@@ -71,153 +71,90 @@
 # 59 Temple Place - Suite 330, Boston, MA 02111-1307, USA.
 # http://www.gnu.org/copyleft/gpl.html
 
-
-if( !defined( 'MEDIAWIKI' ) ) {
-    die();
+# ############################################################################
+# Updated June 2017 by Thomas Williams https://thomasswilliams.github.io/
+# to work with MediaWiki 1.28:
+#  • added "extension.json", "en.json" files as needed to comply with new extension syntax
+#  • kept original GNU license
+#  • kept original comments and code where possible
+#  • removed namespace selection - now only searches main "Article" namespace
+#  • now always outputs search form
+#  • fixed database access, was failing on deprecated function "escapeLike"
+#  • removed deprecated MediaWiki globals $wgRequest, $wgOut, $wgUser
+#  • removed check for "patrol" users
+#  • minor changes to output text
+if ( !defined( "MEDIAWIKI" ) ) {
+	exit;
 }
-
-require_once "SpecialPage.php";
-
-
-$wgExtensionFunctions[] = "wfRigorousSearch";
-
-$wgExtensionCredits['specialpage'][] = array(
-    'path' => __FILE__,
-    'name' =>        'RigorousSearch',
-    'author' =>      'Johan the Ghost',
-    'url' =>         'https://www.mediawiki.org/wiki/Extension:RigorousSearch',
-    'version'=>      '1.0.1',
-    'description' => 'Performs a search on full page text (including links etc.)',
-);
-
-
-function wfRigorousSearch() {
-    global $wgMessageCache;
-    $wgMessageCache->addMessages( array(
-         'rigoroussearch' => 'Rigorous search'
-    ));
-    SpecialPage::addPage( new SpecialRigorousSearch );
-}
-
 
 class SpecialRigorousSearch extends SpecialPage {
 
     /*
-     * Construct the extension and install it as a special page.
+     * Constructor as per https://www.mediawiki.org/wiki/Manual:Special_pages
      */
-    function SpecialRigorousSearch() {
-        // Restrict access to users with "patrol" user rights.
-        SpecialPage::SpecialPage('RigorousSearch', 'patrol');
+    public function __construct( $name = '', $restriction = '', $listed = true ) {
+      parent::__construct( 'RigorousSearch', 'search', $listed );
     }
-
 
     /*
      * The special page handler function.  Receives the parameter
      * specified after "/", if any.
      */
-    function execute($param) {
-        global $wgRequest, $wgOut;
-        global $wgUser;
-
-        // This function is so slow that we only let users with
-        // "patrol" user rights do it.
-        if (!$wgUser->isAllowed('patrol')) {
-            $wgOut->permissionRequired('patrol');
-            return;
-        }
+    public function execute( $par ) {
+        $output = $this->getOutput();
+        $request = $this->getRequest();
 
         // What are we searching for?
         $pattern = null;
-        if ($s = $wgRequest->getVal('pattern'))
+        if ($s = $request->getText('pattern'))
             $pattern = $s;
-        else if ($param)
-            $pattern = $param;
-
-        // What namespaces are we searching?  If none are specified (eg.
-        // this is the first invocation), then default to all.
-        $spaces = SearchEngine::searchableNamespaces();
-        $searchNs = $this->selectedNamespaces($wgRequest, $spaces);
-        if (!$searchNs)
-            $searchNs = $spaces;
+        else if ($par)
+            $pattern = $par;
 
         // Set up the output.
         $this->setHeaders();
-        $wgOut->setPagetitle(wfMsg('rigoroussearch'));
-
-        // If we have a search term, do the search and show the results.
-        if ($pattern)
-            $wgOut->addWikiText($this->searchResults($pattern, $searchNs));
 
         // Make the search form and output it (as HTML, otherwise the
         // form tags get suppressed).
-        $wgOut->addHTML($this->searchForm($pattern, $spaces, $searchNs));
+        // always output the search form
+        $output->addHTML($this->searchForm($pattern));
+
+        // If we have a search term, do the search and show the results.
+        if ($pattern)
+            $output->addWikiText($this->searchResults($pattern));
+
     }
-
-
-    /*
-     * Extract the selected namespaces settings from the request object,
-     * returning a list of index numbers to search.  We are given the
-     * page request and the list of all searchable namespaces.
-     * Returns the namespace list pruned to just the selected ones,
-     * or null if none are selected.
-     */
-    function selectedNamespaces(&$request, &$spaces) {
-        $arr = array();
-        foreach ($spaces as $ns => $name) {
-            if ($request->getCheck('ns' . $ns))
-                $arr[$ns] = $name;
-        }
-
-        return count($arr) > 0 ? $arr : null;
-    }
-
 
     /*
      * Perform a search for the given pattern, and return wiki markup
      * describing the results.
      *     $pattern          the pattern to search for
-     *     $spaces           the list of namespaces selected for searching
      */
-    function searchResults($pattern, &$spaces) {
-        $db = &wfGetDB(DB_SLAVE);
+    private function searchResults($pattern) {
+
         $out = '';
+
+        // Perform the search, and get the match count and results list.
+        $hits = $this->doSearch(0, null, $pattern);
+        $count = count($hits);
 
         // Confirm what we're searching for.
         // NOTE: we have to be careful abou the nowiki tag; using it
         // in the normal way will break the code page in mediawiki.org.
-        $out .= "<div id=\"contentSub\">You rigorously searched for" .
+        $out .= "<p>Rigorous Search for database text like " .
                 " '''<code><" . "nowiki>" . htmlspecialchars($pattern) .
-                "<" . "/nowiki></code>'''</div>\n";
+                "<" . "/nowiki></code>''' returned " .
+                $this->matchCount($count) . "</p>\n";
 
-        // Perform the search, and get the match count and results list.
-        $matches = 0;
-        foreach ($spaces as $ns => $nsname) {
-            $hits = $this->doSearch($db, $ns, $nsname, $pattern);
-            $count = count($hits);
+        // if we got matches, Output the results
+        if ($count != 0) {
 
-            // Output the results for this namespace, if any.
-            if ($count != 0) {
-                // Output the namespace header.
-                if ($ns == 0)
-                    $head = "Article Namespace";
-                else
-                    $head = $nsname . " Namespace";
-                $out .= "<big>'''" . $head . ":'''</big> ";
-                $out .= $this->matchCount($count) . ".\n";
+            // Output the hit list.
+            foreach ($hits as $hit)
+                // hit list is returned as page titles, so wrap in interwiki links
+                $out .= "[[" . $hit . "]]<br>\n";
 
-                // Output the hit list.
-                foreach ($hits as $hit)
-                    $out .= "* [[" . $hit . "]]\n";
-
-                $out .= "\n\n----\n";
-                $matches += $count;
-            }
-        }
-
-        // If we got no hits at all, say so.
-        if ($matches == 0) {
-            $out .= $this->matchCount($matches) . ".\n";
-            $out .= "\n\n----\n";
+            $out .= "\n\n";
         }
 
         // Let's not bother with the TOC.
@@ -226,22 +163,45 @@ class SpecialRigorousSearch extends SpecialPage {
         return $out;
     }
 
-
     /*
      * Perform a search for the given pattern in a specified namespace.
-     *     $db           Database handle
      *     $ns           Namespace ID to search
      *     $nsname       Name of the namespace (null for Main)
      *     $pattern      Pattern to search for
      *
      * Returns a list of the page titles which match.
      */
-    function doSearch(&$db, $ns, $nsname, $pattern) {
+    private function doSearch($ns, $nsname, $pattern) {
+        // declare array of page titles that match the passed pattern
         $matchingPages = array();
 
-        // Escape the pattern string.  escapeLike does normal MySQL escaping,
-        // plus additional processing necessary for LIKE.
-        $pattern = $db->escapeLike($pattern);
+        // remove wildcard, un-needed characters from passed pattern
+        $pattern = str_replace( '"', '', $pattern );
+        $pattern = str_replace( '*', '', $pattern );
+        $pattern = str_replace( '%', '', $pattern );
+        $pattern = str_replace( '\\', '', $pattern );
+        $pattern = str_replace( '/', '', $pattern );
+        $pattern = str_replace( '(', '', $pattern );
+        $pattern = str_replace( ')', '', $pattern );
+        $pattern = str_replace( '[', '', $pattern );
+        $pattern = str_replace( ']', '', $pattern );
+        $pattern = str_replace( '-', '', $pattern );
+        $pattern = str_replace( '_', '', $pattern );
+        $pattern = str_replace( '—', '', $pattern );
+        $pattern = str_replace( '.', '', $pattern );
+        $pattern = str_replace( ';', '', $pattern );
+        $pattern = str_replace( ':', '', $pattern );
+
+        // if no text to search for, return empty array and leave
+        if ( $pattern == '' ) {
+          return array(0, null);
+        }
+
+        // make pattern lowercase
+        $pattern = strtolower($pattern);
+
+        // connect to database, read-only query
+        $db = wfGetDB(DB_SLAVE);
 
         // Select every page in the given namespace.  If we fail, return an
         // empty result.
@@ -260,11 +220,18 @@ class SpecialRigorousSearch extends SpecialPage {
                 continue;
             $text_id = $revRow->rev_text_id;
 
-            // Now select the text for the revision, if it matches the pattern.
-            $queryTxt = "SELECT old_text FROM " . $db->tableName('text') .
-                                " WHERE old_id = " . $text_id .
-                                " AND  old_text LIKE '%" . $pattern . "%'";
-            $textResult = $db->query($queryTxt);
+            // create LIKE clause to match "old_text" column with passed pattern
+            // prepend and append wildcard characters
+            $like_clause = 'CONVERT (old_text using utf8) ' . $db->buildLike( $db->anyString(), $pattern, $db->anyString() );
+
+            // query the database
+            $textResult = $db->select(
+              $db->tableName('text'), // table name
+              array('old_text'), // columns of table to return (note column data is not needed though)
+              array('old_id = ' . $text_id, $like_clause), // conditions AKA parameters
+              __METHOD__ // function name, will appear in SQL logs as "SpecialRigorousSearch"
+            );
+
             if (!$textResult)
                 continue;
 
@@ -277,68 +244,46 @@ class SpecialRigorousSearch extends SpecialPage {
                 // Add to the results.
                 $matchingPages[] = $link;
             }
-
+            // clean up
             $db->freeResult($textResult);
         }
-
+        // clean up
         $db->freeResult($pageResult);
 
         return $matchingPages;
     }
 
-
     /*
      * Create and return the HTML markup for the search form.
      *     $pattern          the default value for the pattern field
-     *     $nameSpaces       the list of searchable namespaces
-     *     $searchSpaces     the list of namespaces currently selected
      */
-    function searchForm($pattern, &$nameSpaces, &$searchSpaces) {
+    private function searchForm($pattern) {
         $out = '';
 
-        // The form header, which links back to this page.
-        $title = Title::makeTitle(NS_SPECIAL,'RigorousSearch');
-        $action = $title->escapeLocalURL();
-        $out .= "<form method=\"get\" action=\"$action\">\n";
+        $out .= "<p>Rigorous search performs a database text search for your search term (multiple search terms are not supported). Database text searches may be slow on large wikis.</p>";
+        // open HTML form
+        $out .= "<form method=\"get\" action=\"/index.php\">\n";
 
         // The search text field.
         $pattern = htmlspecialchars($pattern);
-        $out .= "<p>Search for <input type=\"text\" name=\"pattern\"" .
-                " value=\"$pattern\" size=\"36\" />\n";
+        $out .= "<p><input type=\"search\" name=\"pattern\" value=\"$pattern\" size=\"36\" autofocus=\"autofocus\" autocomplete=\"off\">\n";
+        // hidden output to return to this page on submit
+        $out .= "<input type=\"hidden\" value=\"Special:RigorousSearch\" name=\"title\">";
 
         // The search button.
-        $out .= "<input type=\"submit\" name=\"searchx\" value=\"Search\" /></p>\n";
-
-        // The table of namespace checkboxes.
-        $out .= "<p><table><tr>\n";
-        $i = 0;
-        foreach ($nameSpaces as $ns => $name) {
-            if ($i > 0 && $i % 8 == 0)
-                $out .= "</tr><tr>\n";
-            $checked = array_key_exists($ns, $searchSpaces) ? ' checked="checked"' : '';
-            if (!$name)
-                $name = "Main";
-            else
-                $name = str_replace('_', ' ', $name);
-            $out .= "<td><label><input type='checkbox' value=\"1\" name=\"" .
-              "ns{$ns}\"{$checked} />{$name}</label></td>\n";
-            ++$i;
-        }
-        $out .= "</tr></table></p>\n";
-
+        $out .= "<input type=\"submit\" value=\"Rigorous Search\" tabindex=\"0\" role=\"button\"></p>\n";
+        // close the form
         $out .= "</form>\n";
 
         return $out;
     }
 
-
     /*
      * Make a message describing a match count.
      */
-    function matchCount($num) {
+    private function matchCount($num) {
         if ($num == 0)
-            return "No matches";
-        return $num . ($num == 1 ? " match" : " matches");
+            return "no matches - maybe try a different spelling or less characters.";
+        return $num . ($num == 1 ? " match:" : " matches:");
     }
-
 }
